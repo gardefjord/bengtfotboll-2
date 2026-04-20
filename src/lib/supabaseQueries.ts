@@ -53,6 +53,14 @@ export const probeSeasonsTable = async (client: SupabaseClient) => {
   return true
 }
 
+export const probeLegacyTotalsTables = async (client: SupabaseClient) => {
+  const { error } = await client.from('legacy_training_totals').select('group_id').limit(1)
+  if (error) {
+    return false
+  }
+  return true
+}
+
 export const closeStaleSessions = async (
   client: SupabaseClient,
   resolvedGroupId: string,

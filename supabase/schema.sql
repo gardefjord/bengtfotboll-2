@@ -60,12 +60,38 @@ create table if not exists public.session_guests (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.legacy_training_totals (
+  group_id uuid not null references public.training_groups (id) on delete cascade,
+  player_name text not null,
+  points int not null check (points >= 0),
+  primary key (group_id, lower(player_name))
+);
+
+create table if not exists public.legacy_friend_totals (
+  group_id uuid not null references public.training_groups (id) on delete cascade,
+  player_name text not null,
+  points int not null check (points >= 0),
+  primary key (group_id, lower(player_name))
+);
+
+create table if not exists public.legacy_summary (
+  group_id uuid primary key references public.training_groups (id) on delete cascade,
+  trainings int not null default 0,
+  cancelled int not null default 0,
+  avg_players numeric not null default 0,
+  avg_with_guests numeric not null default 0,
+  updated_at timestamptz not null default now()
+);
+
 alter table public.training_groups enable row level security;
 alter table public.seasons enable row level security;
 alter table public.players enable row level security;
 alter table public.practice_sessions enable row level security;
 alter table public.attendance enable row level security;
 alter table public.session_guests enable row level security;
+alter table public.legacy_training_totals enable row level security;
+alter table public.legacy_friend_totals enable row level security;
+alter table public.legacy_summary enable row level security;
 
 create policy "training_groups_all_anon" on public.training_groups
 for all using (true) with check (true);
@@ -83,4 +109,13 @@ create policy "attendance_all_anon" on public.attendance
 for all using (true) with check (true);
 
 create policy "session_guests_all_anon" on public.session_guests
+for all using (true) with check (true);
+
+create policy "legacy_training_totals_all_anon" on public.legacy_training_totals
+for all using (true) with check (true);
+
+create policy "legacy_friend_totals_all_anon" on public.legacy_friend_totals
+for all using (true) with check (true);
+
+create policy "legacy_summary_all_anon" on public.legacy_summary
 for all using (true) with check (true);

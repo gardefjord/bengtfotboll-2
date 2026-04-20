@@ -15,6 +15,7 @@ import {
   fetchOpenSession,
   PRACTICE_SESSION_SELECT_EXTENDED,
   probePracticeSessionMeta,
+  probeLegacyTotalsTables,
   loadSessionAttendanceAndGuests,
   type Attendance,
   type GuestRow,
@@ -114,6 +115,15 @@ function App() {
   )
   const [friendRows, setFriendRows] = useState<{ rank: number; name: string; points: number }[]>([])
 
+  const [legacyTrainingByName, setLegacyTrainingByName] = useState<Record<string, number>>({})
+  const [legacyFriendByName, setLegacyFriendByName] = useState<Record<string, number>>({})
+  const [legacySummary, setLegacySummary] = useState<{
+    trainings: number
+    cancelled: number
+    avgPlayers: number
+    avgWithGuests: number
+  } | null>(null)
+
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>('')
 
   const [guestName, setGuestName] = useState('')
@@ -129,6 +139,73 @@ function App() {
     () => (session ? formatSvDate(new Date(`${session.session_date}T12:00:00`)) : ''),
     [session],
   )
+
+  useEffect(() => {
+    const loadLegacyStats = async () => {
+      if (!supabase || !groupId) {
+        return
+      }
+
+      const legacyAvailable = await probeLegacyTotalsTables(supabase)
+      if (!legacyAvailable) {
+        setLegacyTrainingByName({})
+        setLegacyFriendByName({})
+        setLegacySummary(null)
+        return
+      }
+
+      const [{ data: trainingRowsData, error: trainingError }, { data: friendRowsData, error: friendError }, { data: summaryRow, error: summaryError }] =
+        await Promise.all([
+          supabase.from('legacy_training_totals').select('player_name, points').eq('group_id', groupId),
+          supabase.from('legacy_friend_totals').select('player_name, points').eq('group_id', groupId),
+          supabase.from('legacy_summary').select('trainings, cancelled, avg_players, avg_with_guests').eq('group_id', groupId).maybeSingle(),
+        ])
+
+      if (trainingError) {
+        console.error(trainingError)
+      }
+      if (friendError) {
+        console.error(friendError)
+      }
+      if (summaryError) {
+        console.error(summaryError)
+      }
+
+      const nextTraining: Record<string, number> = {}
+      for (const row of trainingRowsData ?? []) {
+        const key = String(row.player_name).trim()
+        if (!key) {
+          continue
+        }
+        nextTraining[key] = Number(row.points)
+      }
+
+      const nextFriend: Record<string, number> = {}
+      for (const row of friendRowsData ?? []) {
+        const key = String(row.player_name).trim()
+        if (!key) {
+          continue
+        }
+        nextFriend[key] = Number(row.points)
+      }
+
+      setLegacyTrainingByName(nextTraining)
+      setLegacyFriendByName(nextFriend)
+
+      if (summaryRow) {
+        setLegacySummary({
+          trainings: Number(summaryRow.trainings),
+          cancelled: Number(summaryRow.cancelled),
+          avgPlayers: Number(summaryRow.avg_players),
+          avgWithGuests: Number(summaryRow.avg_with_guests),
+        })
+      } else {
+        setLegacySummary(null)
+      }
+    }
+
+    void loadLegacyStats()
+  }, [groupId, supabase])
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) {
@@ -502,24 +579,74 @@ function App() {
     return rows
   }
 
+  const rankRowsFromNameMap = (nameToPoints: Record<string, number>) => {
+    const entries = Object.entries(nameToPoints)
+      .map(([name, points]) => ({ name, points }))
+      .filter((entry) => entry.points > 0)
+      .sort((a, b) => {
+        if (b.points !== a.points) {
+          return b.points - a.points
+        }
+        return a.name.localeCompare(b.name, 'sv')
+      })
+
+    const rows: { rank: number; name: string; points: number }[] = []
+    let lastPoints: number | null = null
+    let lastRank = 0
+
+    entries.forEach((entry, index) => {
+      const rank = lastPoints === entry.points ? lastRank : index + 1
+      rows.push({ rank, name: entry.name, points: entry.points })
+      lastPoints = entry.points
+      lastRank = rank
+    })
+
+    return rows
+  }
+
   useEffect(() => {
     const loadStats = async () => {
       if (!supabase) {
         return
       }
 
+      const hasLegacyTraining = Object.keys(legacyTrainingByName).length > 0
+      const hasLegacyFriend = Object.keys(legacyFriendByName).length > 0
+
+      if (hasLegacyTraining) {
+        setTrainingRows(rankRowsFromNameMap(legacyTrainingByName))
+      }
+      if (hasLegacyFriend) {
+        setFriendRows(rankRowsFromNameMap(legacyFriendByName))
+      }
+
+      if (legacySummary) {
+        setStatsSummary({
+          trainings: legacySummary.trainings,
+          cancelled: legacySummary.cancelled,
+          avgPlayers: legacySummary.avgPlayers,
+          avgWithGuests: legacySummary.avgWithGuests,
+        })
+      }
+
       const sessionsForStats = closedSessions.filter((row) => !Boolean(row.is_cancelled))
       const cancelledCount = closedSessions.filter((row) => Boolean(row.is_cancelled)).length
 
       if (sessionsForStats.length === 0) {
-        setStatsSummary({
-          trainings: 0,
-          cancelled: cancelledCount,
-          avgPlayers: 0,
-          avgWithGuests: 0,
-        })
-        setTrainingRows([])
-        setFriendRows([])
+        if (!legacySummary) {
+          setStatsSummary({
+            trainings: 0,
+            cancelled: cancelledCount,
+            avgPlayers: 0,
+            avgWithGuests: 0,
+          })
+        }
+        if (!hasLegacyTraining) {
+          setTrainingRows([])
+        }
+        if (!hasLegacyFriend) {
+          setFriendRows([])
+        }
         return
       }
 
@@ -582,19 +709,32 @@ function App() {
           (yesBySession.get(sessionRow.id) ?? 0) + (guestYesBySession.get(sessionRow.id) ?? 0)
       }
 
-      setStatsSummary({
-        trainings: sessionsForStats.length,
-        cancelled: cancelledCount,
-        avgPlayers: Math.round((sumPlayers / sessionsForStats.length) * 100) / 100,
-        avgWithGuests: Math.round((sumWithGuests / sessionsForStats.length) * 100) / 100,
-      })
+      if (!legacySummary) {
+        setStatsSummary({
+          trainings: sessionsForStats.length,
+          cancelled: cancelledCount,
+          avgPlayers: Math.round((sumPlayers / sessionsForStats.length) * 100) / 100,
+          avgWithGuests: Math.round((sumWithGuests / sessionsForStats.length) * 100) / 100,
+        })
+      }
 
-      setTrainingRows(rankRows(trainingScore))
-      setFriendRows(rankRows(friendScore))
+      if (!hasLegacyTraining) {
+        setTrainingRows(rankRows(trainingScore))
+      }
+      if (!hasLegacyFriend) {
+        setFriendRows(rankRows(friendScore))
+      }
     }
 
     void loadStats()
-  }, [closedSessions, players, supabase])
+  }, [
+    closedSessions,
+    players,
+    supabase,
+    legacyTrainingByName,
+    legacyFriendByName,
+    legacySummary,
+  ])
 
   const selectedPlayerName =
     players.find((player) => player.id === selectedPlayerId)?.name ?? ''

@@ -21,6 +21,11 @@ Om du redan körde en äldre version av `schema.sql` tidigare, kör också:
 
 - `supabase/migration-stats-seasons.sql`
 
+Om du vill importera färdiga tabell-värden för **Träningsligan / Bring-a-friend / sammanfattning**:
+
+- `supabase/migration-legacy-stats-tables.sql` (om tabellerna saknas)
+- `supabase/import-legacy-leaderboards.sql`
+
 ## 3) Starta om appen
 
 När `.env.local` är uppdaterad:
