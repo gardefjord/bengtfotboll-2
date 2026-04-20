@@ -13,6 +13,9 @@ import {
   ensureAttendanceRows,
   fetchClosedSessions,
   fetchOpenSession,
+  PRACTICE_SESSION_SELECT_EXTENDED,
+  probePracticeSessionMeta,
+  probeSeasonsTable,
   loadSessionAttendanceAndGuests,
   type Attendance,
   type GuestRow,
@@ -74,6 +77,26 @@ const writeSelectedPlayerId = (playerId: string) => {
 
 const ALL_SEASONS = 'all'
 
+const normalizeSessionRow = (row: SessionRow): SessionRow => ({
+  ...row,
+  is_cancelled: Boolean(row.is_cancelled),
+  season_id: row.season_id ?? null,
+})
+
+const formatSupabaseError = (error: unknown) => {
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = String((error as { message?: string }).message ?? error)
+    if (message.toLowerCase().includes('season')) {
+      return `Supabase-fel: ${message}. Kör migreringen supabase/migration-stats-seasons.sql i SQL Editor.`
+    }
+    if (message.toLowerCase().includes('is_cancelled') || message.includes('season_id')) {
+      return `Supabase-fel: ${message}. Kör migreringen supabase/migration-stats-seasons.sql i SQL Editor.`
+    }
+    return `Supabase-fel: ${message}`
+  }
+  return 'Kunde inte ladda data från Supabase.'
+}
+
 function App() {
   const [tab, setTab] = useState<Tab>('training')
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -87,6 +110,7 @@ function App() {
   const [closedSessions, setClosedSessions] = useState<SessionRow[]>([])
   const [seasons, setSeasons] = useState<SeasonRow[]>([])
   const [selectedSeasonId, setSelectedSeasonId] = useState<string>(ALL_SEASONS)
+  const [includeSessionMeta, setIncludeSessionMeta] = useState(false)
 
   const [statsSummary, setStatsSummary] = useState({
     trainings: 0,
@@ -133,6 +157,11 @@ function App() {
       setLoading(true)
       setLoadError(null)
       try {
+        const resolvedIncludeSessionMeta = await probePracticeSessionMeta(client)
+        setIncludeSessionMeta(resolvedIncludeSessionMeta)
+
+        const seasonsTableAvailable = await probeSeasonsTable(client)
+
         const { data: group, error: groupError } = await client
           .from('training_groups')
           .select('id')
@@ -196,34 +225,39 @@ function App() {
 
         setPlayers(nextPlayers)
 
-        const { data: seasonRows, error: seasonsReadError } = await client
-          .from('seasons')
-          .select('id, label, starts_on, ends_on')
-          .eq('group_id', resolvedGroupId)
-          .order('starts_on', { ascending: true, nullsFirst: true })
-
-        if (seasonsReadError) {
-          throw seasonsReadError
-        }
-
-        let nextSeasons = (seasonRows ?? []) as SeasonRow[]
+        let nextSeasons: SeasonRow[] = []
         let seasonIdForNewSessions: string | null = null
 
-        if (nextSeasons.length === 0) {
-          const { data: insertedSeason, error: seasonInsertError } = await client
+        if (seasonsTableAvailable) {
+          const { data: seasonRows, error: seasonsReadError } = await client
             .from('seasons')
-            .insert({ group_id: resolvedGroupId, label: 'Alla tider' })
             .select('id, label, starts_on, ends_on')
-            .single()
+            .eq('group_id', resolvedGroupId)
+            .order('starts_on', { ascending: true, nullsFirst: true })
 
-          if (seasonInsertError) {
-            throw seasonInsertError
+          if (seasonsReadError) {
+            throw seasonsReadError
           }
 
-          nextSeasons = [insertedSeason as SeasonRow]
+          nextSeasons = (seasonRows ?? []) as SeasonRow[]
+
+          if (nextSeasons.length === 0) {
+            const { data: insertedSeason, error: seasonInsertError } = await client
+              .from('seasons')
+              .insert({ group_id: resolvedGroupId, label: 'Alla tider' })
+              .select('id, label, starts_on, ends_on')
+              .single()
+
+            if (seasonInsertError) {
+              throw seasonInsertError
+            }
+
+            nextSeasons = [insertedSeason as SeasonRow]
+          }
+
+          seasonIdForNewSessions = nextSeasons[0]?.id ?? null
         }
 
-        seasonIdForNewSessions = nextSeasons[0]?.id ?? null
         setSeasons(nextSeasons)
         setSelectedSeasonId(ALL_SEASONS)
 
@@ -233,27 +267,58 @@ function App() {
 
         await closeStaleSessions(client, resolvedGroupId, toDateOnly(today))
 
-        let activeSession = await fetchOpenSession(client, resolvedGroupId)
+        const existingSession = await fetchOpenSession(
+          client,
+          resolvedGroupId,
+          resolvedIncludeSessionMeta,
+        )
+        let activeSession = existingSession
+          ? normalizeSessionRow(existingSession as SessionRow)
+          : null
         if (!activeSession || activeSession.session_date !== sessionDate) {
-          const { data: insertedSession, error: sessionInsertError } = await client
-            .from('practice_sessions')
-            .insert({
-              group_id: resolvedGroupId,
-              season_id: seasonIdForNewSessions,
-              session_date: sessionDate,
-              status: 'open',
-              is_cancelled: false,
-            })
-            .select('id, session_date, status, is_cancelled, season_id')
-            .single()
+          const insertPayload: Record<string, unknown> = {
+            group_id: resolvedGroupId,
+            session_date: sessionDate,
+            status: 'open',
+          }
+          if (seasonsTableAvailable && resolvedIncludeSessionMeta && seasonIdForNewSessions) {
+            insertPayload.season_id = seasonIdForNewSessions
+            insertPayload.is_cancelled = false
+          }
+
+          let insertedSession: SessionRow | null = null
+          let sessionInsertError = null
+
+          if (resolvedIncludeSessionMeta) {
+            const inserted = await client
+              .from('practice_sessions')
+              .insert(insertPayload)
+              .select(PRACTICE_SESSION_SELECT_EXTENDED)
+              .single()
+            insertedSession = inserted.data as SessionRow | null
+            sessionInsertError = inserted.error
+          } else {
+            const inserted = await client
+              .from('practice_sessions')
+              .insert(insertPayload)
+              .select('id, session_date, status')
+              .single()
+            insertedSession = inserted.data as SessionRow | null
+            sessionInsertError = inserted.error
+          }
 
           if (sessionInsertError) {
-            activeSession = await fetchOpenSession(client, resolvedGroupId)
+            const reopened = await fetchOpenSession(
+              client,
+              resolvedGroupId,
+              resolvedIncludeSessionMeta,
+            )
+            activeSession = reopened ? normalizeSessionRow(reopened as SessionRow) : null
             if (!activeSession) {
               throw sessionInsertError
             }
           } else {
-            activeSession = insertedSession as SessionRow
+            activeSession = normalizeSessionRow(insertedSession as SessionRow)
             await ensureAttendanceRows(client, activeSession.id, nextPlayers.map((p) => p.id))
           }
         }
@@ -277,11 +342,15 @@ function App() {
           writeSelectedPlayerId(initialId)
         }
 
-        const closed = await fetchClosedSessions(client, resolvedGroupId)
-        setClosedSessions(closed)
+        const closedRaw = await fetchClosedSessions(
+          client,
+          resolvedGroupId,
+          resolvedIncludeSessionMeta,
+        )
+        setClosedSessions(closedRaw.map((row) => normalizeSessionRow(row as SessionRow)))
       } catch (error) {
         console.error(error)
-        setLoadError('Kunde inte ladda data från Supabase. Kontrollera tabeller, RLS och API-nycklar.')
+        setLoadError(formatSupabaseError(error))
       } finally {
         setLoading(false)
       }
@@ -395,8 +464,8 @@ function App() {
     setResponses(loaded.responses)
     setGuests(loaded.guests)
 
-    const closed = await fetchClosedSessions(supabase, groupId)
-    setClosedSessions(closed)
+    const closed = await fetchClosedSessions(supabase, groupId, includeSessionMeta)
+    setClosedSessions(closed.map((row) => normalizeSessionRow(row as SessionRow)))
   }
 
   const removePlayer = async (playerId: string) => {
@@ -426,8 +495,8 @@ function App() {
     })
 
     if (groupId) {
-      const closed = await fetchClosedSessions(supabase, groupId)
-      setClosedSessions(closed)
+      const closed = await fetchClosedSessions(supabase, groupId, includeSessionMeta)
+      setClosedSessions(closed.map((row) => normalizeSessionRow(row as SessionRow)))
     }
   }
 
@@ -522,8 +591,8 @@ function App() {
         return
       }
 
-      const sessionsForStats = filteredClosedSessions.filter((row) => !row.is_cancelled)
-      const cancelledCount = filteredClosedSessions.filter((row) => row.is_cancelled).length
+      const sessionsForStats = filteredClosedSessions.filter((row) => !Boolean(row.is_cancelled))
+      const cancelledCount = filteredClosedSessions.filter((row) => Boolean(row.is_cancelled)).length
 
       if (sessionsForStats.length === 0) {
         setStatsSummary({

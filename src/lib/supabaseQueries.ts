@@ -9,8 +9,8 @@ export type SessionRow = {
   id: string
   session_date: string
   status: 'open' | 'closed'
-  is_cancelled: boolean
-  season_id: string | null
+  is_cancelled?: boolean
+  season_id?: string | null
 }
 
 export type SeasonRow = {
@@ -28,6 +28,30 @@ export type GuestRow = {
 }
 
 export type Attendance = 'yes' | 'no' | 'unknown'
+
+export const PRACTICE_SESSION_SELECT_BASIC = 'id, session_date, status'
+export const PRACTICE_SESSION_SELECT_EXTENDED =
+  'id, session_date, status, is_cancelled, season_id'
+
+export const probePracticeSessionMeta = async (client: SupabaseClient) => {
+  const { error } = await client
+    .from('practice_sessions')
+    .select(PRACTICE_SESSION_SELECT_EXTENDED)
+    .limit(1)
+
+  if (error) {
+    return false
+  }
+  return true
+}
+
+export const probeSeasonsTable = async (client: SupabaseClient) => {
+  const { error } = await client.from('seasons').select('id').limit(1)
+  if (error) {
+    return false
+  }
+  return true
+}
 
 export const closeStaleSessions = async (
   client: SupabaseClient,
@@ -60,10 +84,30 @@ export const closeStaleSessions = async (
   }
 }
 
-export const fetchOpenSession = async (client: SupabaseClient, resolvedGroupId: string) => {
+export const fetchOpenSession = async (
+  client: SupabaseClient,
+  resolvedGroupId: string,
+  includeSessionMeta: boolean,
+) => {
+  if (includeSessionMeta) {
+    const { data, error } = await client
+      .from('practice_sessions')
+      .select(PRACTICE_SESSION_SELECT_EXTENDED)
+      .eq('group_id', resolvedGroupId)
+      .eq('status', 'open')
+      .order('session_date', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (error) {
+      throw error
+    }
+    return (data as SessionRow | null) ?? null
+  }
+
   const { data, error } = await client
     .from('practice_sessions')
-    .select('id, session_date, status, is_cancelled, season_id')
+    .select(PRACTICE_SESSION_SELECT_BASIC)
     .eq('group_id', resolvedGroupId)
     .eq('status', 'open')
     .order('session_date', { ascending: false })
@@ -76,10 +120,28 @@ export const fetchOpenSession = async (client: SupabaseClient, resolvedGroupId: 
   return (data as SessionRow | null) ?? null
 }
 
-export const fetchClosedSessions = async (client: SupabaseClient, resolvedGroupId: string) => {
+export const fetchClosedSessions = async (
+  client: SupabaseClient,
+  resolvedGroupId: string,
+  includeSessionMeta: boolean,
+) => {
+  if (includeSessionMeta) {
+    const { data, error } = await client
+      .from('practice_sessions')
+      .select(PRACTICE_SESSION_SELECT_EXTENDED)
+      .eq('group_id', resolvedGroupId)
+      .eq('status', 'closed')
+      .order('session_date', { ascending: true })
+
+    if (error) {
+      throw error
+    }
+    return (data as SessionRow[]) ?? []
+  }
+
   const { data, error } = await client
     .from('practice_sessions')
-    .select('id, session_date, status, is_cancelled, season_id')
+    .select(PRACTICE_SESSION_SELECT_BASIC)
     .eq('group_id', resolvedGroupId)
     .eq('status', 'closed')
     .order('session_date', { ascending: true })
