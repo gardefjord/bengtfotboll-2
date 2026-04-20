@@ -15,12 +15,10 @@ import {
   fetchOpenSession,
   PRACTICE_SESSION_SELECT_EXTENDED,
   probePracticeSessionMeta,
-  probeSeasonsTable,
   loadSessionAttendanceAndGuests,
   type Attendance,
   type GuestRow,
   type PlayerRow,
-  type SeasonRow,
   type SessionRow,
 } from './lib/supabaseQueries'
 
@@ -75,8 +73,6 @@ const writeSelectedPlayerId = (playerId: string) => {
   localStorage.setItem(SELECTED_PLAYER_KEY, playerId)
 }
 
-const ALL_SEASONS = 'all'
-
 const normalizeSessionRow = (row: SessionRow): SessionRow => ({
   ...row,
   is_cancelled: Boolean(row.is_cancelled),
@@ -86,9 +82,6 @@ const normalizeSessionRow = (row: SessionRow): SessionRow => ({
 const formatSupabaseError = (error: unknown) => {
   if (error && typeof error === 'object' && 'message' in error) {
     const message = String((error as { message?: string }).message ?? error)
-    if (message.toLowerCase().includes('season')) {
-      return `Supabase-fel: ${message}. Kör migreringen supabase/migration-stats-seasons.sql i SQL Editor.`
-    }
     if (message.toLowerCase().includes('is_cancelled') || message.includes('season_id')) {
       return `Supabase-fel: ${message}. Kör migreringen supabase/migration-stats-seasons.sql i SQL Editor.`
     }
@@ -108,8 +101,6 @@ function App() {
   const [responses, setResponses] = useState<Record<string, Attendance>>({})
   const [guests, setGuests] = useState<GuestRow[]>([])
   const [closedSessions, setClosedSessions] = useState<SessionRow[]>([])
-  const [seasons, setSeasons] = useState<SeasonRow[]>([])
-  const [selectedSeasonId, setSelectedSeasonId] = useState<string>(ALL_SEASONS)
   const [includeSessionMeta, setIncludeSessionMeta] = useState(false)
 
   const [statsSummary, setStatsSummary] = useState({
@@ -118,9 +109,6 @@ function App() {
     avgPlayers: 0,
     avgWithGuests: 0,
   })
-  const [marathonRows, setMarathonRows] = useState<{ rank: number; name: string; points: number }[]>(
-    [],
-  )
   const [trainingRows, setTrainingRows] = useState<{ rank: number; name: string; points: number }[]>(
     [],
   )
@@ -159,8 +147,6 @@ function App() {
       try {
         const resolvedIncludeSessionMeta = await probePracticeSessionMeta(client)
         setIncludeSessionMeta(resolvedIncludeSessionMeta)
-
-        const seasonsTableAvailable = await probeSeasonsTable(client)
 
         const { data: group, error: groupError } = await client
           .from('training_groups')
@@ -225,42 +211,6 @@ function App() {
 
         setPlayers(nextPlayers)
 
-        let nextSeasons: SeasonRow[] = []
-        let seasonIdForNewSessions: string | null = null
-
-        if (seasonsTableAvailable) {
-          const { data: seasonRows, error: seasonsReadError } = await client
-            .from('seasons')
-            .select('id, label, starts_on, ends_on')
-            .eq('group_id', resolvedGroupId)
-            .order('starts_on', { ascending: true, nullsFirst: true })
-
-          if (seasonsReadError) {
-            throw seasonsReadError
-          }
-
-          nextSeasons = (seasonRows ?? []) as SeasonRow[]
-
-          if (nextSeasons.length === 0) {
-            const { data: insertedSeason, error: seasonInsertError } = await client
-              .from('seasons')
-              .insert({ group_id: resolvedGroupId, label: 'Alla tider' })
-              .select('id, label, starts_on, ends_on')
-              .single()
-
-            if (seasonInsertError) {
-              throw seasonInsertError
-            }
-
-            nextSeasons = [insertedSeason as SeasonRow]
-          }
-
-          seasonIdForNewSessions = nextSeasons[0]?.id ?? null
-        }
-
-        setSeasons(nextSeasons)
-        setSelectedSeasonId(ALL_SEASONS)
-
         const today = new Date()
         const targetPractice = getNextPracticeDate(today)
         const sessionDate = toDateOnly(targetPractice)
@@ -281,8 +231,7 @@ function App() {
             session_date: sessionDate,
             status: 'open',
           }
-          if (seasonsTableAvailable && resolvedIncludeSessionMeta && seasonIdForNewSessions) {
-            insertPayload.season_id = seasonIdForNewSessions
+          if (resolvedIncludeSessionMeta) {
             insertPayload.is_cancelled = false
           }
 
@@ -524,38 +473,6 @@ function App() {
     [players, responses],
   )
 
-  const seasonBounds = useMemo(() => {
-    if (selectedSeasonId === ALL_SEASONS) {
-      return null
-    }
-    return seasons.find((season) => season.id === selectedSeasonId) ?? null
-  }, [seasons, selectedSeasonId])
-
-  const filteredClosedSessions = useMemo(() => {
-    if (!seasonBounds) {
-      return closedSessions
-    }
-
-    return closedSessions.filter((sessionRow) => {
-      if (sessionRow.season_id && sessionRow.season_id === seasonBounds.id) {
-        return true
-      }
-
-      if (!sessionRow.season_id) {
-        const sessionKey = sessionRow.session_date
-        if (seasonBounds.starts_on && sessionKey < seasonBounds.starts_on) {
-          return false
-        }
-        if (seasonBounds.ends_on && sessionKey > seasonBounds.ends_on) {
-          return false
-        }
-        return true
-      }
-
-      return false
-    })
-  }, [closedSessions, seasonBounds])
-
   const rankRows = (scores: Record<string, number>) => {
     const entries = Object.entries(scores)
       .map(([playerId, points]) => ({
@@ -591,8 +508,8 @@ function App() {
         return
       }
 
-      const sessionsForStats = filteredClosedSessions.filter((row) => !Boolean(row.is_cancelled))
-      const cancelledCount = filteredClosedSessions.filter((row) => Boolean(row.is_cancelled)).length
+      const sessionsForStats = closedSessions.filter((row) => !Boolean(row.is_cancelled))
+      const cancelledCount = closedSessions.filter((row) => Boolean(row.is_cancelled)).length
 
       if (sessionsForStats.length === 0) {
         setStatsSummary({
@@ -601,7 +518,6 @@ function App() {
           avgPlayers: 0,
           avgWithGuests: 0,
         })
-        setMarathonRows([])
         setTrainingRows([])
         setFriendRows([])
         return
@@ -658,11 +574,6 @@ function App() {
         friendScore[hostId] = (friendScore[hostId] ?? 0) + 1
       }
 
-      const marathonScore: Record<string, number> = {}
-      for (const player of players) {
-        marathonScore[player.id] = (trainingScore[player.id] ?? 0) + (friendScore[player.id] ?? 0)
-      }
-
       let sumPlayers = 0
       let sumWithGuests = 0
       for (const sessionRow of sessionsForStats) {
@@ -678,13 +589,12 @@ function App() {
         avgWithGuests: Math.round((sumWithGuests / sessionsForStats.length) * 100) / 100,
       })
 
-      setMarathonRows(rankRows(marathonScore))
       setTrainingRows(rankRows(trainingScore))
       setFriendRows(rankRows(friendScore))
     }
 
     void loadStats()
-  }, [filteredClosedSessions, players, supabase])
+  }, [closedSessions, players, supabase])
 
   const selectedPlayerName =
     players.find((player) => player.id === selectedPlayerId)?.name ?? ''
@@ -876,48 +786,14 @@ function App() {
       {tab === 'stats' && (
         <section className="stats-page">
           <div className="card">
-            <label htmlFor="season">Välj säsong</label>
-            <select
-              id="season"
-              value={selectedSeasonId}
-              onChange={(event) => setSelectedSeasonId(event.target.value)}
-            >
-              <option value={ALL_SEASONS}>Alla säsonger</option>
-              {seasons.map((season) => (
-                <option key={season.id} value={season.id}>
-                  {season.label}
-                </option>
-              ))}
-            </select>
+            <h2>Statistik</h2>
             <p className="muted small">
-              Marathontabellen räknar träningar du kommit på plus gäster du tagit med (som kom). Träningsligan
-              räknar bara dina egna träningar.
+              Poäng = antal gånger du svarat <strong>Kommer</strong> på stängda träningar. Bring-a-friend räknar
+              gäster du tagit med som kommer.
             </p>
           </div>
 
           <div className="grid-two">
-            <section className="card">
-              <h2>Marathontabellen</h2>
-              <table>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Spelare</th>
-                    <th>Poäng</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {marathonRows.map((row, index) => (
-                    <tr key={`marathon-${index}-${row.name}`}>
-                      <td>{row.rank}</td>
-                      <td>{row.name}</td>
-                      <td>{row.points}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
-
             <section className="card">
               <h2>Träningsligan</h2>
               <table>
@@ -939,29 +815,29 @@ function App() {
                 </tbody>
               </table>
             </section>
-          </div>
 
-          <section className="card">
-            <h2>Bring-a-friend-ligan</h2>
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Spelare</th>
-                  <th>Poäng</th>
-                </tr>
-              </thead>
-              <tbody>
-                {friendRows.map((row, index) => (
-                  <tr key={`friends-${index}-${row.name}`}>
-                    <td>{row.rank}</td>
-                    <td>{row.name}</td>
-                    <td>{row.points}</td>
+            <section className="card">
+              <h2>Bring-a-friend-ligan</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Spelare</th>
+                    <th>Poäng</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
+                </thead>
+                <tbody>
+                  {friendRows.map((row, index) => (
+                    <tr key={`friends-${index}-${row.name}`}>
+                      <td>{row.rank}</td>
+                      <td>{row.name}</td>
+                      <td>{row.points}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
 
           <div className="grid-two">
             <section className="card">
