@@ -61,18 +61,26 @@ create table if not exists public.session_guests (
 );
 
 create table if not exists public.legacy_training_totals (
+  id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.training_groups (id) on delete cascade,
   player_name text not null,
   points int not null check (points >= 0),
-  primary key (group_id, lower(player_name))
+  unique (group_id, player_name)
 );
 
+create unique index if not exists legacy_training_totals_group_player_lower_idx
+on public.legacy_training_totals (group_id, lower(player_name));
+
 create table if not exists public.legacy_friend_totals (
+  id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.training_groups (id) on delete cascade,
   player_name text not null,
   points int not null check (points >= 0),
-  primary key (group_id, lower(player_name))
+  unique (group_id, player_name)
 );
+
+create unique index if not exists legacy_friend_totals_group_player_lower_idx
+on public.legacy_friend_totals (group_id, lower(player_name));
 
 create table if not exists public.legacy_summary (
   group_id uuid primary key references public.training_groups (id) on delete cascade,

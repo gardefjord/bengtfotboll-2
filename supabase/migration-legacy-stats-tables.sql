@@ -1,20 +1,32 @@
 -- Kör i Supabase SQL Editor om du redan har ett projekt utan legacy-tabellerna.
 
-create table if not exists public.legacy_training_totals (
+drop table if exists public.legacy_training_totals cascade;
+drop table if exists public.legacy_friend_totals cascade;
+drop table if exists public.legacy_summary cascade;
+
+create table public.legacy_training_totals (
+  id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.training_groups (id) on delete cascade,
   player_name text not null,
   points int not null check (points >= 0),
-  primary key (group_id, lower(player_name))
+  unique (group_id, player_name)
 );
 
-create table if not exists public.legacy_friend_totals (
+create unique index legacy_training_totals_group_player_lower_idx
+on public.legacy_training_totals (group_id, lower(player_name));
+
+create table public.legacy_friend_totals (
+  id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.training_groups (id) on delete cascade,
   player_name text not null,
   points int not null check (points >= 0),
-  primary key (group_id, lower(player_name))
+  unique (group_id, player_name)
 );
 
-create table if not exists public.legacy_summary (
+create unique index legacy_friend_totals_group_player_lower_idx
+on public.legacy_friend_totals (group_id, lower(player_name));
+
+create table public.legacy_summary (
   group_id uuid primary key references public.training_groups (id) on delete cascade,
   trainings int not null default 0,
   cancelled int not null default 0,
