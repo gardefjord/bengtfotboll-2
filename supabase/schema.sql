@@ -21,11 +21,23 @@ create table if not exists public.players (
 create unique index if not exists players_group_name_lower_unique_idx
 on public.players (group_id, lower(name));
 
+create table if not exists public.seasons (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.training_groups (id) on delete cascade,
+  label text not null,
+  starts_on date,
+  ends_on date,
+  created_at timestamptz not null default now(),
+  unique (group_id, label)
+);
+
 create table if not exists public.practice_sessions (
   id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.training_groups (id) on delete cascade,
+  season_id uuid references public.seasons (id) on delete set null,
   session_date date not null,
   status text not null check (status in ('open', 'closed')),
+  is_cancelled boolean not null default false,
   closed_at timestamptz,
   created_at timestamptz not null default now(),
   unique (group_id, session_date)
@@ -49,12 +61,16 @@ create table if not exists public.session_guests (
 );
 
 alter table public.training_groups enable row level security;
+alter table public.seasons enable row level security;
 alter table public.players enable row level security;
 alter table public.practice_sessions enable row level security;
 alter table public.attendance enable row level security;
 alter table public.session_guests enable row level security;
 
 create policy "training_groups_all_anon" on public.training_groups
+for all using (true) with check (true);
+
+create policy "seasons_all_anon" on public.seasons
 for all using (true) with check (true);
 
 create policy "players_all_anon" on public.players

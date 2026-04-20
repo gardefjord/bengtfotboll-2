@@ -9,6 +9,15 @@ export type SessionRow = {
   id: string
   session_date: string
   status: 'open' | 'closed'
+  is_cancelled: boolean
+  season_id: string | null
+}
+
+export type SeasonRow = {
+  id: string
+  label: string
+  starts_on: string | null
+  ends_on: string | null
 }
 
 export type GuestRow = {
@@ -54,7 +63,7 @@ export const closeStaleSessions = async (
 export const fetchOpenSession = async (client: SupabaseClient, resolvedGroupId: string) => {
   const { data, error } = await client
     .from('practice_sessions')
-    .select('id, session_date, status')
+    .select('id, session_date, status, is_cancelled, season_id')
     .eq('group_id', resolvedGroupId)
     .eq('status', 'open')
     .order('session_date', { ascending: false })
@@ -70,7 +79,7 @@ export const fetchOpenSession = async (client: SupabaseClient, resolvedGroupId: 
 export const fetchClosedSessions = async (client: SupabaseClient, resolvedGroupId: string) => {
   const { data, error } = await client
     .from('practice_sessions')
-    .select('id, session_date, status')
+    .select('id, session_date, status, is_cancelled, season_id')
     .eq('group_id', resolvedGroupId)
     .eq('status', 'closed')
     .order('session_date', { ascending: true })

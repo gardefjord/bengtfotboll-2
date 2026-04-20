@@ -17,6 +17,10 @@
 5. Kopiera allt i den filen och klistra in i SQL Editor.
 6. Klicka **Run**.
 
+Om du redan körde en äldre version av `schema.sql` tidigare, kör också:
+
+- `supabase/migration-stats-seasons.sql`
+
 ## 3) Starta om appen
 
 När `.env.local` är uppdaterad:

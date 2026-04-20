@@ -17,6 +17,7 @@ import {
   type Attendance,
   type GuestRow,
   type PlayerRow,
+  type SeasonRow,
   type SessionRow,
 } from './lib/supabaseQueries'
 
@@ -71,6 +72,8 @@ const writeSelectedPlayerId = (playerId: string) => {
   localStorage.setItem(SELECTED_PLAYER_KEY, playerId)
 }
 
+const ALL_SEASONS = 'all'
+
 function App() {
   const [tab, setTab] = useState<Tab>('training')
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -82,10 +85,22 @@ function App() {
   const [responses, setResponses] = useState<Record<string, Attendance>>({})
   const [guests, setGuests] = useState<GuestRow[]>([])
   const [closedSessions, setClosedSessions] = useState<SessionRow[]>([])
+  const [seasons, setSeasons] = useState<SeasonRow[]>([])
+  const [selectedSeasonId, setSelectedSeasonId] = useState<string>(ALL_SEASONS)
 
-  const [statsTotals, setStatsTotals] = useState<Record<string, { yes: number; no: number }>>(
-    {},
+  const [statsSummary, setStatsSummary] = useState({
+    trainings: 0,
+    cancelled: 0,
+    avgPlayers: 0,
+    avgWithGuests: 0,
+  })
+  const [marathonRows, setMarathonRows] = useState<{ rank: number; name: string; points: number }[]>(
+    [],
   )
+  const [trainingRows, setTrainingRows] = useState<{ rank: number; name: string; points: number }[]>(
+    [],
+  )
+  const [friendRows, setFriendRows] = useState<{ rank: number; name: string; points: number }[]>([])
 
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>('')
 
@@ -181,6 +196,37 @@ function App() {
 
         setPlayers(nextPlayers)
 
+        const { data: seasonRows, error: seasonsReadError } = await client
+          .from('seasons')
+          .select('id, label, starts_on, ends_on')
+          .eq('group_id', resolvedGroupId)
+          .order('starts_on', { ascending: true, nullsFirst: true })
+
+        if (seasonsReadError) {
+          throw seasonsReadError
+        }
+
+        let nextSeasons = (seasonRows ?? []) as SeasonRow[]
+        let seasonIdForNewSessions: string | null = null
+
+        if (nextSeasons.length === 0) {
+          const { data: insertedSeason, error: seasonInsertError } = await client
+            .from('seasons')
+            .insert({ group_id: resolvedGroupId, label: 'Alla tider' })
+            .select('id, label, starts_on, ends_on')
+            .single()
+
+          if (seasonInsertError) {
+            throw seasonInsertError
+          }
+
+          nextSeasons = [insertedSeason as SeasonRow]
+        }
+
+        seasonIdForNewSessions = nextSeasons[0]?.id ?? null
+        setSeasons(nextSeasons)
+        setSelectedSeasonId(ALL_SEASONS)
+
         const today = new Date()
         const targetPractice = getNextPracticeDate(today)
         const sessionDate = toDateOnly(targetPractice)
@@ -193,10 +239,12 @@ function App() {
             .from('practice_sessions')
             .insert({
               group_id: resolvedGroupId,
+              season_id: seasonIdForNewSessions,
               session_date: sessionDate,
               status: 'open',
+              is_cancelled: false,
             })
-            .select('id, session_date, status')
+            .select('id, session_date, status, is_cancelled, season_id')
             .single()
 
           if (sessionInsertError) {
@@ -407,58 +455,167 @@ function App() {
     [players, responses],
   )
 
+  const seasonBounds = useMemo(() => {
+    if (selectedSeasonId === ALL_SEASONS) {
+      return null
+    }
+    return seasons.find((season) => season.id === selectedSeasonId) ?? null
+  }, [seasons, selectedSeasonId])
+
+  const filteredClosedSessions = useMemo(() => {
+    if (!seasonBounds) {
+      return closedSessions
+    }
+
+    return closedSessions.filter((sessionRow) => {
+      if (sessionRow.season_id && sessionRow.season_id === seasonBounds.id) {
+        return true
+      }
+
+      if (!sessionRow.season_id) {
+        const sessionKey = sessionRow.session_date
+        if (seasonBounds.starts_on && sessionKey < seasonBounds.starts_on) {
+          return false
+        }
+        if (seasonBounds.ends_on && sessionKey > seasonBounds.ends_on) {
+          return false
+        }
+        return true
+      }
+
+      return false
+    })
+  }, [closedSessions, seasonBounds])
+
+  const rankRows = (scores: Record<string, number>) => {
+    const entries = Object.entries(scores)
+      .map(([playerId, points]) => ({
+        playerId,
+        points,
+        name: players.find((player) => player.id === playerId)?.name ?? 'Okänd spelare',
+      }))
+      .filter((entry) => entry.points > 0)
+      .sort((a, b) => {
+        if (b.points !== a.points) {
+          return b.points - a.points
+        }
+        return a.name.localeCompare(b.name, 'sv')
+      })
+
+    const rows: { rank: number; name: string; points: number }[] = []
+    let lastPoints: number | null = null
+    let lastRank = 0
+
+    entries.forEach((entry, index) => {
+      const rank = lastPoints === entry.points ? lastRank : index + 1
+      rows.push({ rank, name: entry.name, points: entry.points })
+      lastPoints = entry.points
+      lastRank = rank
+    })
+
+    return rows
+  }
+
   useEffect(() => {
     const loadStats = async () => {
       if (!supabase) {
         return
       }
 
-      if (closedSessions.length === 0) {
-        setStatsTotals(
-          players.reduce<Record<string, { yes: number; no: number }>>((acc, player) => {
-            acc[player.id] = { yes: 0, no: 0 }
-            return acc
-          }, {}),
-        )
+      const sessionsForStats = filteredClosedSessions.filter((row) => !row.is_cancelled)
+      const cancelledCount = filteredClosedSessions.filter((row) => row.is_cancelled).length
+
+      if (sessionsForStats.length === 0) {
+        setStatsSummary({
+          trainings: 0,
+          cancelled: cancelledCount,
+          avgPlayers: 0,
+          avgWithGuests: 0,
+        })
+        setMarathonRows([])
+        setTrainingRows([])
+        setFriendRows([])
         return
       }
 
-      const sessionIds = closedSessions.map((row) => row.id)
-      const { data, error } = await supabase
-        .from('attendance')
-        .select('session_id, player_id, status')
-        .in('session_id', sessionIds)
+      const sessionIds = sessionsForStats.map((row) => row.id)
 
-      if (error) {
-        console.error(error)
+      const [{ data: attendanceRows, error: attendanceError }, { data: guestRows, error: guestError }] =
+        await Promise.all([
+          supabase.from('attendance').select('session_id, player_id, status').in('session_id', sessionIds),
+          supabase
+            .from('session_guests')
+            .select('session_id, host_player_id, status')
+            .in('session_id', sessionIds),
+        ])
+
+      if (attendanceError) {
+        console.error(attendanceError)
+        return
+      }
+      if (guestError) {
+        console.error(guestError)
         return
       }
 
-      const next = players.reduce<Record<string, { yes: number; no: number }>>(
-        (acc, player) => {
-          acc[player.id] = { yes: 0, no: 0 }
-          return acc
-        },
-        {},
-      )
+      const yesBySession = new Map<string, number>()
+      const guestYesBySession = new Map<string, number>()
 
-      for (const row of data ?? []) {
-        const playerId = row.player_id as string
-        if (!next[playerId]) {
+      const trainingScore: Record<string, number> = {}
+      const friendScore: Record<string, number> = {}
+
+      for (const player of players) {
+        trainingScore[player.id] = 0
+        friendScore[player.id] = 0
+      }
+
+      for (const row of attendanceRows ?? []) {
+        if (row.status !== 'yes') {
           continue
         }
-        if (row.status === 'yes') {
-          next[playerId].yes += 1
-        } else if (row.status === 'no') {
-          next[playerId].no += 1
-        }
+        const sessionId = row.session_id as string
+        const playerId = row.player_id as string
+        yesBySession.set(sessionId, (yesBySession.get(sessionId) ?? 0) + 1)
+        trainingScore[playerId] = (trainingScore[playerId] ?? 0) + 1
       }
 
-      setStatsTotals(next)
+      for (const row of guestRows ?? []) {
+        if (row.status !== 'yes') {
+          continue
+        }
+        const sessionId = row.session_id as string
+        guestYesBySession.set(sessionId, (guestYesBySession.get(sessionId) ?? 0) + 1)
+        const hostId = row.host_player_id as string
+        friendScore[hostId] = (friendScore[hostId] ?? 0) + 1
+      }
+
+      const marathonScore: Record<string, number> = {}
+      for (const player of players) {
+        marathonScore[player.id] = (trainingScore[player.id] ?? 0) + (friendScore[player.id] ?? 0)
+      }
+
+      let sumPlayers = 0
+      let sumWithGuests = 0
+      for (const sessionRow of sessionsForStats) {
+        sumPlayers += yesBySession.get(sessionRow.id) ?? 0
+        sumWithGuests +=
+          (yesBySession.get(sessionRow.id) ?? 0) + (guestYesBySession.get(sessionRow.id) ?? 0)
+      }
+
+      setStatsSummary({
+        trainings: sessionsForStats.length,
+        cancelled: cancelledCount,
+        avgPlayers: Math.round((sumPlayers / sessionsForStats.length) * 100) / 100,
+        avgWithGuests: Math.round((sumWithGuests / sessionsForStats.length) * 100) / 100,
+      })
+
+      setMarathonRows(rankRows(marathonScore))
+      setTrainingRows(rankRows(trainingScore))
+      setFriendRows(rankRows(friendScore))
     }
 
     void loadStats()
-  }, [closedSessions, players, supabase])
+  }, [filteredClosedSessions, players, supabase])
 
   const selectedPlayerName =
     players.find((player) => player.id === selectedPlayerId)?.name ?? ''
@@ -648,31 +805,109 @@ function App() {
       )}
 
       {tab === 'stats' && (
-        <section className="card">
-          <h2>Statistik</h2>
-          <p>Stängda träningar: {closedSessions.length}</p>
-          <p className="muted">
-            Varje rad räknar hur många gånger en spelare svarat Kommer eller Kan inte på en stängd
-            träning.
-          </p>
-          <table>
-            <thead>
-              <tr>
-                <th>Spelare</th>
-                <th>Kommer</th>
-                <th>Kan inte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {players.map((player) => (
-                <tr key={player.id}>
-                  <td>{player.name}</td>
-                  <td>{statsTotals[player.id]?.yes ?? 0}</td>
-                  <td>{statsTotals[player.id]?.no ?? 0}</td>
-                </tr>
+        <section className="stats-page">
+          <div className="card">
+            <label htmlFor="season">Välj säsong</label>
+            <select
+              id="season"
+              value={selectedSeasonId}
+              onChange={(event) => setSelectedSeasonId(event.target.value)}
+            >
+              <option value={ALL_SEASONS}>Alla säsonger</option>
+              {seasons.map((season) => (
+                <option key={season.id} value={season.id}>
+                  {season.label}
+                </option>
               ))}
-            </tbody>
-          </table>
+            </select>
+            <p className="muted small">
+              Marathontabellen räknar träningar du kommit på plus gäster du tagit med (som kom). Träningsligan
+              räknar bara dina egna träningar.
+            </p>
+          </div>
+
+          <div className="grid-two">
+            <section className="card">
+              <h2>Marathontabellen</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Spelare</th>
+                    <th>Poäng</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {marathonRows.map((row, index) => (
+                    <tr key={`marathon-${index}-${row.name}`}>
+                      <td>{row.rank}</td>
+                      <td>{row.name}</td>
+                      <td>{row.points}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+
+            <section className="card">
+              <h2>Träningsligan</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Spelare</th>
+                    <th>Poäng</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trainingRows.map((row, index) => (
+                    <tr key={`training-${index}-${row.name}`}>
+                      <td>{row.rank}</td>
+                      <td>{row.name}</td>
+                      <td>{row.points}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
+
+          <section className="card">
+            <h2>Bring-a-friend-ligan</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Spelare</th>
+                  <th>Poäng</th>
+                </tr>
+              </thead>
+              <tbody>
+                {friendRows.map((row, index) => (
+                  <tr key={`friends-${index}-${row.name}`}>
+                    <td>{row.rank}</td>
+                    <td>{row.name}</td>
+                    <td>{row.points}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+
+          <div className="grid-two">
+            <section className="card">
+              <h2>Antal träningar</h2>
+              <p>
+                {statsSummary.trainings} ({statsSummary.cancelled} inställda)
+              </p>
+            </section>
+            <section className="card">
+              <h2>Genomsnittlig närvaro</h2>
+              <p>
+                {statsSummary.avgPlayers} ({statsSummary.avgWithGuests} med gäster)
+              </p>
+            </section>
+          </div>
         </section>
       )}
 
